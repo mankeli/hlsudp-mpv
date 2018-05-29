@@ -42,6 +42,10 @@
 #include "options/m_option.h"
 #include "udpcomm_c.h"
 
+#define IMGFMT IMGFMT_RGB24
+#define FIXW 192
+#define FIXH 96
+
 struct vo_hlsudp_opts {
     int brightness;
     int delay;
@@ -65,12 +69,38 @@ struct priv {
     uint16_t* maptab;
     int frame;
     hlsudpcomm_t* ctx;
+
+    int swidth, sheight;
+
+    struct mp_sws_context *sws;
+
 };
 
 static int reconfig(struct vo *vo, struct mp_image_params *params)
 {
     struct priv *p = vo->priv;
-    mp_image_unrefp(&p->current);
+    //mp_image_unrefp(&p->current);
+
+    p->swidth = FIXW;
+    p->sheight = FIXH;
+
+    mp_sws_set_from_cmdline(p->sws, vo->global);
+    p->sws->src = *params;
+    p->sws->dst = (struct mp_image_params) {
+        .imgfmt = IMGFMT,
+        .w = p->swidth,
+        .h = p->sheight,
+        .p_w = 1,
+        .p_h = 1,
+    };
+
+    p->current = mp_image_alloc(IMGFMT, p->swidth, p->sheight);
+    if (!p->current)
+        return -1;
+
+    if (mp_sws_reinit(p->sws) < 0)
+        return -1;
+
 
     return 0;
 }
@@ -98,10 +128,18 @@ static void draw_image(struct vo *vo, mp_image_t *mpi)
 {
     struct priv *p = vo->priv;
 
-    p->current = mpi;
+//    p->current = mpi;
+    struct mp_image src = *mpi;
 
     struct mp_osd_res dim = osd_res_from_image_params(vo->params);
-    osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, p->current);
+    osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, mpi);
+
+    mp_sws_scale(p->sws, p->current, &src);
+
+  //  struct mp_osd_res dim = osd_res_from_image_params(vo->params);
+//    osd_draw_on_image(vo->osd, dim, mpi->pts, OSD_DRAW_SUB_ONLY, p->current);
+
+    talloc_free(mpi);
 }
 
 static void flip_page(struct vo *vo)
@@ -127,18 +165,17 @@ static void flip_page(struct vo *vo)
     hf++;
 #endif
 
-	printf("sending tiles for %i, swap %i\n", p->frame-2, p->frame);
+    MP_VERBOSE(vo, "sending tiles for %i, swap %i\n", p->frame, p->frame-2);
+
 
     hlsudp_sendswap(p->ctx, p->frame-2);
 
-    const int tilesize_x = 16;
-    const int tilesize_y = 16;
+    static const int tilesize_x = 16;
+    static const int tilesize_y = 16;
 
     uint16_t data[tilesize_x*tilesize_y*3];
 
 //  diod.sendswap();
-
-    int br = p->opts->brightness;
 
     for (int xb = 0; xb < p->current->w; xb += tilesize_x)
     {
@@ -164,20 +201,24 @@ static void flip_page(struct vo *vo)
         }
         usleep(p->opts->delay);
     }
-
-    mp_image_unrefp(&p->current);
 }
 
 static int query_format(struct vo *vo, int fmt)
 {
-    return fmt == IMGFMT_RGB24;
+//    return fmt == IMGFMT;
+
+    if (sws_isSupportedInput(imgfmt2pixfmt(fmt)))
+        return 1;
+return 0;
 }
 
 static void uninit(struct vo *vo)
 {
     struct priv *p = vo->priv;
 
-    mp_image_unrefp(&p->current);
+//    mp_image_unrefp(&p->current);
+    if (p->sws)
+        talloc_free(p->sws);
 
     hlsudp_shutdown(p->ctx);
 }
@@ -186,6 +227,7 @@ static int preinit(struct vo *vo)
 {
     struct priv *p = vo->priv;
     p->opts = mp_get_config_group(vo, vo->global, &vo_hlsudp_conf);
+    p->sws = mp_sws_alloc(vo);
 
     p->maptab = gengammatab(p->opts->brightness);
 
